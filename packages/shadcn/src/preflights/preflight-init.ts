@@ -5,11 +5,12 @@ import {
   formatMonorepoMessage,
   getMonorepoTargets,
   isMonorepoRoot,
-} from "@/src/utils/get-monorepo-info"
-import { getProjectInfo } from "@/src/utils/get-project-info"
-import { highlighter } from "@/src/utils/highlighter"
-import { logger } from "@/src/utils/logger"
-import { spinner } from "@/src/utils/spinner"
+} from "@shadcn/registry/internal/get-monorepo-info"
+import { getProjectInfo } from "@shadcn/registry/internal/get-project-info"
+import { highlighter } from "@shadcn/registry/internal/highlighter"
+import { logger } from "@shadcn/registry/internal/logger"
+import { SHADCN_URL } from "@shadcn/registry/internal/registry/constants"
+import { spinner } from "@shadcn/registry/internal/spinner"
 import fs from "fs-extra"
 import { z } from "zod"
 
@@ -132,6 +133,7 @@ export async function preFlightInit(
   const tsConfigSpinner = spinner(`Validating import alias.`, {
     silent: options.silent,
   }).start()
+
   if (!projectInfo?.aliasPrefix) {
     errors[ERRORS.IMPORT_ALIAS_MISSING] = true
     tsConfigSpinner?.fail()
@@ -162,14 +164,23 @@ export async function preFlightInit(
 
     if (errors[ERRORS.IMPORT_ALIAS_MISSING]) {
       logger.break()
-      logger.error(`No import alias found in your tsconfig.json file.`)
-      if (projectInfo?.framework.links.installation) {
-        logger.error(
-          `Visit ${highlighter.info(
-            projectInfo?.framework.links.installation
-          )} to learn how to set an import alias.`
-        )
-      }
+      logger.error(
+        `Could not find valid path aliases or package imports for ${highlighter.info(
+          "init"
+        )}.`
+      )
+      logger.error(
+        `Configure path aliases in ${highlighter.info(
+          "tsconfig.json"
+        )} or imports in ${highlighter.info("package.json")}, then run ${highlighter.info(
+          "init"
+        )} again.`
+      )
+      logger.error(
+        `Learn more at ${highlighter.info(
+          `${SHADCN_URL}/docs/installation/manual#configure-import-aliases`
+        )}.`
+      )
     }
 
     logger.break()

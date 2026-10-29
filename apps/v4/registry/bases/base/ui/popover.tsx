@@ -2,8 +2,7 @@
 
 import * as React from "react"
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
-
-import { cn } from "@/registry/bases/base/lib/utils"
+import { cn } from "cn"
 
 function Popover({ ...props }: PopoverPrimitive.Root.Props) {
   return <PopoverPrimitive.Root data-slot="popover" {...props} />
@@ -61,7 +60,7 @@ function PopoverTitle({ className, ...props }: PopoverPrimitive.Title.Props) {
   return (
     <PopoverPrimitive.Title
       data-slot="popover-title"
-      className={cn("cn-popover-title cn-font-heading", className)}
+      className={cn("cn-popover-title", className)}
       {...props}
     />
   )

@@ -1,4 +1,9 @@
-import { spinner } from "@/src/utils/spinner"
+import {
+  getPackageManager,
+  getPackageManagerFromUserAgent,
+  getPackageRunnerCommand,
+} from "@shadcn/registry/internal/get-package-manager"
+import { spinner } from "@shadcn/registry/internal/spinner"
 import { execa } from "execa"
 import fs from "fs-extra"
 import prompts from "prompts"
@@ -18,11 +23,13 @@ import { createProject } from "./create-project"
 vi.mock("fs-extra")
 vi.mock("execa")
 vi.mock("prompts")
-vi.mock("@/src/utils/get-package-manager", () => ({
+vi.mock("@shadcn/registry/internal/get-package-manager", () => ({
   getPackageManager: vi.fn().mockResolvedValue("npm"),
+  getPackageManagerFromUserAgent: vi.fn(() => "npm"),
+  getPackageRunnerCommand: vi.fn(() => "npx"),
 }))
-vi.mock("@/src/utils/spinner")
-vi.mock("@/src/utils/logger", () => ({
+vi.mock("@shadcn/registry/internal/spinner")
+vi.mock("@shadcn/registry/internal/logger", () => ({
   logger: {
     break: vi.fn(),
     error: vi.fn(),
@@ -35,6 +42,9 @@ describe("createProject", () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(getPackageManager).mockResolvedValue("npm")
+    vi.mocked(getPackageManagerFromUserAgent).mockReturnValue("npm")
+    vi.mocked(getPackageRunnerCommand).mockReturnValue("npx")
 
     // Reset all fs mocks
     vi.mocked(fs.access).mockResolvedValue(undefined)

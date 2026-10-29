@@ -1,9 +1,10 @@
 import os from "os"
 import path from "path"
-import type { RegistryItem } from "@/src/registry/schema"
-import type { Config } from "@/src/utils/get-config"
 import { handleError } from "@/src/utils/handle-error"
-import { spinner } from "@/src/utils/spinner"
+import type { Config } from "@shadcn/registry/internal/get-config"
+import { parsePnpmWorkspacePackages } from "@shadcn/registry/internal/get-monorepo-info"
+import type { RegistryItem } from "@shadcn/registry/internal/registry/schema"
+import { spinner } from "@shadcn/registry/internal/spinner"
 import { execa } from "execa"
 import fs from "fs-extra"
 
@@ -93,19 +94,26 @@ export function resolveTemplate(
 }
 
 // Get the appropriate install args for the given package manager.
-function getInstallArgs(packageManager: string): string[] {
+export function getInstallArgs(packageManager: string): string[] {
   switch (packageManager) {
     case "pnpm":
       // pnpm enables frozen lockfile in CI by default.
       // The template lockfile may drift, so force-disable it explicitly.
       return ["--no-frozen-lockfile"]
+    case "yarn":
+      // Yarn enables immutable installs in CI by default.
+      // New template projects need to create their lockfile on first install.
+      return ["--no-immutable"]
+    case "npm":
+      // The output is not shown, and npm's audit can take most of the install time.
+      return ["--no-audit", "--no-fund"]
     default:
       return []
   }
 }
 
 // Adapt a pnpm-based monorepo template to the target package manager.
-async function adaptWorkspaceConfig(
+export async function adaptWorkspaceConfig(
   projectPath: string,
   packageManager: string
 ) {
@@ -122,34 +130,39 @@ async function adaptWorkspaceConfig(
     await fs.remove(lockFilePath)
   }
 
-  const isMonorepo = fs.existsSync(pnpmWorkspacePath)
+  const hasPnpmWorkspaceConfig = fs.existsSync(pnpmWorkspacePath)
+  const workspacePatterns = hasPnpmWorkspaceConfig
+    ? parsePnpmWorkspacePackages(await fs.readFile(pnpmWorkspacePath, "utf8"))
+    : []
+  const isMonorepo = workspacePatterns.length > 0
 
-  // Update root package.json: strip "packageManager" field to avoid
-  // triggering Corepack, and add "workspaces" for npm/bun/yarn.
+  // Update root package.json: update "packageManager" field for the
+  // target package manager, and add "workspaces" for npm/bun/yarn.
   if (fs.existsSync(packageJsonPath)) {
     const packageJsonContent = await fs.readFile(packageJsonPath, "utf8")
     const packageJson = JSON.parse(packageJsonContent)
-    delete packageJson.packageManager
 
     if (isMonorepo) {
-      // Read workspace patterns from pnpm-workspace.yaml.
-      const workspaceContent = await fs.readFile(pnpmWorkspacePath, "utf8")
-      const patterns: string[] = []
-      for (const line of workspaceContent.split("\n")) {
-        const match = line.match(/^\s*-\s*["']?(.+?)["']?\s*$/)
-        if (match) {
-          patterns.push(match[1])
-        }
-      }
+      // Monorepo templates use turbo which requires packageManager.
+      // Replace the pnpm value with the target package manager.
+      packageJson.packageManager =
+        await getPackageManagerVersion(packageManager)
+    } else {
+      delete packageJson.packageManager
+    }
 
-      packageJson.workspaces = patterns
-      await fs.remove(pnpmWorkspacePath)
+    if (isMonorepo) {
+      packageJson.workspaces = workspacePatterns
     }
 
     await fs.writeFile(
       packageJsonPath,
       JSON.stringify(packageJson, null, 2) + "\n"
     )
+  }
+
+  if (hasPnpmWorkspaceConfig) {
+    await fs.remove(pnpmWorkspacePath)
   }
 
   // Rewrite workspace: protocol references in nested package.json files.
@@ -160,9 +173,19 @@ async function adaptWorkspaceConfig(
   }
 }
 
+// Get the package manager name and version string (e.g. "bun@1.2.0").
+async function getPackageManagerVersion(packageManager: string) {
+  try {
+    const { stdout } = await execa(packageManager, ["--version"])
+    return `${packageManager}@${stdout.trim()}`
+  } catch {
+    return `${packageManager}@*`
+  }
+}
+
 // Recursively find all package.json files and replace workspace: protocol
 // version specifiers with "*", which npm understands.
-async function rewriteWorkspaceProtocol(dir: string) {
+export async function rewriteWorkspaceProtocol(dir: string) {
   const entries = await fs.readdir(dir, { withFileTypes: true })
   for (const entry of entries) {
     if (entry.name === "node_modules") continue

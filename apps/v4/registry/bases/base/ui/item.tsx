@@ -2,8 +2,8 @@ import * as React from "react"
 import { mergeProps } from "@base-ui/react/merge-props"
 import { useRender } from "@base-ui/react/use-render"
 import { cva, type VariantProps } from "class-variance-authority"
+import { cn } from "cn"
 
-import { cn } from "@/registry/bases/base/lib/utils"
 import { Separator } from "@/registry/bases/base/ui/separator"
 
 function ItemGroup({ className, ...props }: React.ComponentProps<"div">) {
@@ -129,7 +129,7 @@ function ItemTitle({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="item-title"
       className={cn(
-        "cn-item-title cn-font-heading line-clamp-1 flex w-fit items-center",
+        "cn-item-title line-clamp-1 flex w-fit items-center",
         className
       )}
       {...props}

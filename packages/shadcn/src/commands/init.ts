@@ -1,7 +1,6 @@
 import { promises as fs } from "fs"
 import path from "path"
 import { preFlightInit } from "@/src/preflights/preflight-init"
-import { decodePreset, isPresetCode } from "@/src/preset/preset"
 import {
   DEFAULT_PRESETS,
   promptForBase,
@@ -9,20 +8,13 @@ import {
   resolveInitUrl,
   resolveRegistryBaseConfig,
 } from "@/src/preset/presets"
-import { getRegistryBaseColors, getRegistryStyles } from "@/src/registry/api"
-import { BUILTIN_REGISTRIES, SHADCN_URL } from "@/src/registry/constants"
-import { clearRegistryContext } from "@/src/registry/context"
-import { registryConfigSchema } from "@/src/registry/schema"
-import { isUrl } from "@/src/registry/utils"
-import { rawConfigSchema } from "@/src/schema"
 import {
   getTemplateForFramework,
   resolveTemplate,
   templates,
 } from "@/src/templates/index"
-import { addComponents } from "@/src/utils/add-components"
+import { getInitAliasDefaults } from "@/src/utils/alias"
 import { createProject } from "@/src/utils/create-project"
-import { loadEnvFiles } from "@/src/utils/env-loader"
 import * as ERRORS from "@/src/utils/errors"
 import {
   createFileBackup,
@@ -30,33 +22,56 @@ import {
   FILE_BACKUP_SUFFIX,
   restoreFileBackup,
 } from "@/src/utils/file-helper"
+import { handleError } from "@/src/utils/handle-error"
+import { ensureRegistriesInConfig } from "@/src/utils/registries"
+import { getRegistryStyles } from "@/src/utils/registry-api"
+import { addComponents } from "@shadcn/registry/internal/add-components"
+import { loadEnvFiles } from "@shadcn/registry/internal/env-loader"
 import {
   DEFAULT_COMPONENTS,
   DEFAULT_TAILWIND_CONFIG,
   DEFAULT_TAILWIND_CSS,
   DEFAULT_UTILS,
   explorer,
+  getBase,
   getConfig,
   getWorkspaceConfig,
   resolveConfigPaths,
   type Config,
-} from "@/src/utils/get-config"
+} from "@shadcn/registry/internal/get-config"
 import {
   formatMonorepoMessage,
   getMonorepoTargets,
   isMonorepoRoot,
-} from "@/src/utils/get-monorepo-info"
+} from "@shadcn/registry/internal/get-monorepo-info"
 import {
   getProjectComponents,
   getProjectConfig,
   getProjectInfo,
   getProjectTailwindVersionFromConfig,
-} from "@/src/utils/get-project-info"
-import { handleError } from "@/src/utils/handle-error"
-import { highlighter } from "@/src/utils/highlighter"
-import { logger } from "@/src/utils/logger"
-import { ensureRegistriesInConfig } from "@/src/utils/registries"
-import { spinner } from "@/src/utils/spinner"
+} from "@shadcn/registry/internal/get-project-info"
+import { highlighter } from "@shadcn/registry/internal/highlighter"
+import { logger } from "@shadcn/registry/internal/logger"
+import {
+  decodePreset,
+  isPresetBase,
+  isPresetCode,
+  PRESET_BASES,
+  type PresetBase,
+} from "@shadcn/registry/internal/preset/preset"
+import { getRegistryBaseColors } from "@shadcn/registry/internal/registry/api"
+import {
+  BUILTIN_REGISTRIES,
+  SHADCN_URL,
+} from "@shadcn/registry/internal/registry/constants"
+import { clearRegistryContext } from "@shadcn/registry/internal/registry/context"
+import { registryConfigSchema } from "@shadcn/registry/internal/registry/schema"
+import { isUrl } from "@shadcn/registry/internal/registry/utils"
+import { spinner } from "@shadcn/registry/internal/spinner"
+import {
+  rawConfigSchema,
+  registryBaseConfigSchema,
+} from "@shadcn/registry/schema"
 import { Command } from "commander"
 import deepmerge from "deepmerge"
 import fsExtra from "fs-extra"
@@ -76,12 +91,13 @@ export const initOptionsSchema = z.object({
   isNewProject: z.boolean().default(false),
   cssVariables: z.boolean().default(true),
   rtl: z.boolean().optional(),
-  base: z.enum(["radix", "base"]).optional(),
+  pointer: z.boolean().optional(),
+  base: z.enum(PRESET_BASES).optional(),
   template: z.string().optional(),
   monorepo: z.boolean().optional(),
-  existingConfig: z.record(z.unknown()).optional(),
+  existingConfig: z.record(z.string(), z.unknown()).optional(),
   installStyleIndex: z.boolean().default(true),
-  registryBaseConfig: rawConfigSchema.deepPartial().optional(),
+  registryBaseConfig: registryBaseConfigSchema.optional(),
   menuColor: z
     .enum([
       "default",
@@ -94,6 +110,25 @@ export const initOptionsSchema = z.object({
   iconLibrary: z.string().optional(),
 })
 
+export function applyInitUrlOptions(
+  url: URL,
+  options: Pick<z.infer<typeof initOptionsSchema>, "rtl" | "pointer">
+) {
+  if (options.rtl) {
+    url.searchParams.set("rtl", "true")
+  } else if (options.rtl === false) {
+    url.searchParams.delete("rtl")
+  }
+
+  if (options.pointer) {
+    url.searchParams.set("pointer", "true")
+  } else if (options.pointer === false) {
+    url.searchParams.delete("pointer")
+  }
+
+  return url
+}
+
 export const init = new Command()
   .name("init")
   .alias("create")
@@ -103,7 +138,10 @@ export const init = new Command()
     "-t, --template <template>",
     "the template to use. (next, start, vite, react-router, laravel, astro)"
   )
-  .option("-b, --base <base>", "the component library to use. (radix, base)")
+  .option(
+    "-b, --base <base>",
+    "the component library to use. (base, radix, aria)"
+  )
   .option("--monorepo", "scaffold a monorepo project.")
   .option("--no-monorepo", "skip the monorepo prompt.")
   .option("-p, --preset [name]", "use a preset configuration")
@@ -125,6 +163,8 @@ export const init = new Command()
   .option("--no-css-variables", "do not use css variables for theming.")
   .option("--rtl", "enable RTL support.")
   .option("--no-rtl", "disable RTL support.")
+  .option("--pointer", "enable pointer cursor for buttons.")
+  .option("--no-pointer", "disable pointer cursor for buttons.")
   .option("--reinstall", "re-install existing UI components.")
   .option("--no-reinstall", "do not re-install existing UI components.")
   .action(async (components, opts) => {
@@ -149,7 +189,7 @@ export const init = new Command()
       })
       const presetsByName = new Map(Object.entries(DEFAULT_PRESETS))
 
-      let presetBase: string | undefined
+      let presetBase: PresetBase | undefined
 
       if (options.defaults) {
         options.template = options.template || "next"
@@ -240,7 +280,11 @@ export const init = new Command()
             path.resolve(cwd, "components.json")
           )
         } catch {
-          // Ignore read errors.
+          logger.warn(
+            `Could not parse the existing ${highlighter.info(
+              "components.json"
+            )}. Unable to detect the current base.`
+          )
         }
 
         // Pass existing config so preflight can use it (e.g. tailwind.css path in monorepos).
@@ -369,6 +413,7 @@ export const init = new Command()
             rtl: options.rtl ?? false,
             template: options.template,
             base: options.base!,
+            pointer: options.pointer,
           })
           components = [result.url, ...components]
           presetBase = result.base
@@ -379,16 +424,13 @@ export const init = new Command()
 
           if (isUrl(presetArg)) {
             const url = new URL(presetArg)
-            if (options.rtl) {
-              url.searchParams.set("rtl", "true")
-            } else if (options.rtl === false) {
-              url.searchParams.delete("rtl")
-            }
+            applyInitUrlOptions(url, options)
             if (url.pathname === "/init" && presetArg.startsWith(SHADCN_URL)) {
               url.searchParams.set("track", "1")
             }
             initUrl = url.toString()
-            presetBase = url.searchParams.get("base") ?? undefined
+            const base = url.searchParams.get("base")
+            presetBase = isPresetBase(base) ? base : undefined
           } else if (isPresetCode(presetArg)) {
             const decoded = decodePreset(presetArg)
             if (!decoded) {
@@ -398,15 +440,19 @@ export const init = new Command()
               logger.break()
               process.exit(1)
             }
-            // Preset codes no longer carry base — use "radix" as placeholder.
+            // Preset codes no longer carry base, so use "base" as placeholder.
             // The correct base is set in the URL after resolution below.
             initUrl = resolveInitUrl(
               {
                 ...decoded,
-                base: "radix",
+                base: "base",
                 rtl: options.rtl ?? false,
               },
-              { template: options.template, preset: presetArg }
+              {
+                template: options.template,
+                preset: presetArg,
+                pointer: options.pointer,
+              }
             )
             presetBase = undefined
           } else {
@@ -417,10 +463,10 @@ export const init = new Command()
             initUrl = resolveInitUrl(
               {
                 ...preset,
-                base: options.base ?? "radix",
+                base: options.base ?? "base",
                 rtl: options.rtl ?? preset.rtl,
               },
-              { template: options.template }
+              { template: options.template, pointer: options.pointer }
             )
             presetBase = undefined
           }
@@ -430,20 +476,22 @@ export const init = new Command()
       }
 
       // Resolve base: --base flag > preset/prompt/URL > existing config > prompt.
-      let resolvedBase: string =
+      let resolvedBase: PresetBase | undefined =
         options.base ??
         presetBase ??
-        (existingConfig?.style
-          ? (existingConfig.style as string).startsWith("base-")
-            ? "base"
-            : "radix"
-          : "")
+        (typeof existingConfig?.style === "string"
+          ? getBase(existingConfig.style)
+          : undefined)
+
+      // If a components.json exists but could not be parsed, we cannot know
+      // the current base, so never pick one silently.
+      const unknownExistingBase = hasExistingConfig && !existingConfig
 
       if (!resolvedBase) {
-        if (components.length > 0) {
-          // When initializing from a registry item, default to radix.
+        if (components.length > 0 && !unknownExistingBase) {
+          // When initializing from a registry item, default to base.
           // The registry:base config will override this.
-          resolvedBase = "radix"
+          resolvedBase = "base"
         } else {
           const base = await promptForBase()
           resolvedBase = base
@@ -459,7 +507,7 @@ export const init = new Command()
             base: resolvedBase,
             rtl: options.rtl ?? false,
           },
-          { template: options.template }
+          { template: options.template, pointer: options.pointer }
         )
         components = [initUrl, ...components]
       }
@@ -565,6 +613,7 @@ export async function runInit(
   }
 ) {
   let projectInfo
+  let projectConfig
   let newProjectTemplate: keyof typeof templates | undefined
 
   // Resolve the effective template if --monorepo is set.
@@ -606,6 +655,8 @@ export async function runInit(
     projectInfo = await getProjectInfo(options.cwd)
   }
 
+  projectConfig = await getProjectConfig(options.cwd, projectInfo)
+
   // Use the template from project creation if available,
   // or fall back to the explicit --template flag.
   const templateKey = newProjectTemplate ?? explicitTemplate
@@ -619,6 +670,12 @@ export async function runInit(
     // Add button component for new template-based projects.
     ...(selectedTemplate ? ["button"] : []),
   ]
+  // Tie postInit to actual project creation in this run (createProject
+  // sets newProjectTemplate). A caller-provided `options.isNewProject`
+  // alone should not trigger postInit.
+  const templatePostInit = newProjectTemplate
+    ? selectedTemplate?.postInit
+    : undefined
 
   if (selectedTemplate?.init) {
     const result = await selectedTemplate.init({
@@ -632,15 +689,15 @@ export async function runInit(
       silent: options.silent,
     })
 
-    // Run postInit for new projects (e.g. git init).
-    await selectedTemplate.postInit({ projectPath: options.cwd })
+    if (templatePostInit) {
+      // Run postInit for newly scaffolded projects (e.g. git init).
+      await templatePostInit({ projectPath: options.cwd })
+    }
 
     return result
   }
 
   // Standard init path for existing projects.
-  const projectConfig = await getProjectConfig(options.cwd, projectInfo)
-
   let config = projectConfig
     ? await promptForMinimalConfig(projectConfig, options)
     : await promptForConfig(await getConfig(options.cwd))
@@ -662,17 +719,20 @@ export async function runInit(
 
   // Ensure registries are configured for the components we're about to add.
   const fullConfigForRegistry = await resolveConfigPaths(options.cwd, config)
-  const { config: configWithRegistries } = await ensureRegistriesInConfig(
-    components,
-    fullConfigForRegistry,
-    {
+  const { discoveredRegistries, packageJsonRegistries } =
+    await ensureRegistriesInConfig(components, fullConfigForRegistry, {
       silent: true,
-    }
-  )
+      writeFile: false,
+    })
 
-  // Update config with any new registries found.
-  if (configWithRegistries.registries) {
-    config.registries = configWithRegistries.registries
+  // Update config with registries discovered from the registries index.
+  // Registries declared in package.json are resolved in memory below and
+  // never persisted to components.json.
+  if (Object.keys(discoveredRegistries).length > 0) {
+    config.registries = {
+      ...config.registries,
+      ...discoveredRegistries,
+    }
   }
 
   const componentSpinner = spinner(`Writing components.json.`).start()
@@ -725,6 +785,16 @@ export async function runInit(
 
   // Propagate design settings to workspace components.json files.
   const fullConfig = await resolveConfigPaths(options.cwd, config)
+
+  // Include package.json-declared registries for installation. These are
+  // resolved in memory and stay out of the components.json we just wrote.
+  if (Object.keys(packageJsonRegistries).length > 0) {
+    fullConfig.registries = {
+      ...fullConfig.registries,
+      ...packageJsonRegistries,
+    }
+  }
+
   const workspaceConfig = await getWorkspaceConfig(fullConfig)
   if (workspaceConfig) {
     const designSettings: Record<string, unknown> = {}
@@ -756,7 +826,7 @@ export async function runInit(
     }
   }
 
-  // Clear cosmiconfig cache so addComponents re-reads the updated workspace configs.
+  // Clear the config cache so addComponents re-reads the updated workspace configs.
   explorer.clearCaches()
 
   // Add components.
@@ -770,9 +840,9 @@ export async function runInit(
       options.isNewProject || projectInfo?.framework.name === "next-app",
   })
 
-  // Run postInit for new projects without a custom init (e.g. git init).
-  if (selectedTemplate) {
-    await selectedTemplate.postInit({ projectPath: options.cwd })
+  // Run postInit only for newly scaffolded projects.
+  if (templatePostInit) {
+    await templatePostInit({ projectPath: options.cwd })
   }
 
   return fullConfig
@@ -857,12 +927,6 @@ async function promptForConfig(defaultConfig: Config | null = null) {
       initial: defaultConfig?.aliases["components"] ?? DEFAULT_COMPONENTS,
     },
     {
-      type: "text",
-      name: "utils",
-      message: `Configure the import alias for ${highlighter.info("utils")}:`,
-      initial: defaultConfig?.aliases["utils"] ?? DEFAULT_UTILS,
-    },
-    {
       type: "toggle",
       name: "rsc",
       message: `Are you using ${highlighter.info("React Server Components")}?`,
@@ -875,6 +939,16 @@ async function promptForConfig(defaultConfig: Config | null = null) {
   if (!options.style) {
     process.exit(1)
   }
+
+  const existingAliases =
+    defaultConfig && defaultConfig.aliases.components === options.components
+      ? defaultConfig.aliases
+      : undefined
+
+  const aliasDefaults = getInitAliasDefaults(
+    options.components,
+    existingAliases
+  )
 
   return rawConfigSchema.parse({
     $schema: "https://ui.shadcn.com/schema.json",
@@ -889,11 +963,11 @@ async function promptForConfig(defaultConfig: Config | null = null) {
     rsc: options.rsc,
     tsx: options.typescript,
     aliases: {
-      utils: options.utils,
       components: options.components,
-      // TODO: fix this.
-      lib: options.components.replace(/\/components$/, "lib"),
-      hooks: options.components.replace(/\/components$/, "hooks"),
+      ui: aliasDefaults.ui,
+      lib: aliasDefaults.lib,
+      hooks: aliasDefaults.hooks,
+      utils: aliasDefaults.utils,
     },
   })
 }
@@ -950,9 +1024,11 @@ async function promptForMinimalConfig(
   })
 }
 
-async function confirmBaseSwitch(existingStyle: string, resolvedBase: string) {
-  // Styles prefixed with "base-" use Base UI. Everything else is Radix.
-  const oldBase = existingStyle.startsWith("base-") ? "base" : "radix"
+async function confirmBaseSwitch(
+  existingStyle: string,
+  resolvedBase: PresetBase
+) {
+  const oldBase = getBase(existingStyle)
   if (resolvedBase === oldBase) return resolvedBase
 
   logger.warn(
